@@ -1,0 +1,235 @@
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <cublas_v2.h> //launch with -lcublas option to work
+#include <time.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+//Single-treaded matrix multiplication
+__global__ void multiplyMatrixesSingleThreaded(float*, float*, float*, unsigned int);
+
+//Comapres two matrices
+void checkResult(float*, float*, unsigned int);
+
+//Multi-threaded matrix multiplication
+__global__ void multiplyMatrixMultiThreaded(float*, float*, float*, unsigned int);
+
+//Fills a matrix with 0, 1 and 2
+void initMatrix(float* matrix, unsigned int size);
+
+//Multiplies marices using shared memory
+__global__ void multiplyMatrixShared(float*, float*, float*, unsigned int);
+
+//Multiplies matrices using cuBLAS library
+void multiplyMatrixCublas(float*, float*, float*, int);
+
+//prints matrix
+void print(float*, int);
+
+//Finds best block size for shared memory kernel
+int bestSplit(int);
+
+int main()
+{
+	printf("---Matrix multiplication with CUDA ---\n\n");
+	//Initialize necessary values
+	cudaEvent_t start, stop;
+	float timeElapsed;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	srand(time(NULL));
+	const unsigned int size = 1003;
+	size_t memSize = sizeof(unsigned int) * size * size;
+
+	//Query the device about free memory
+	size_t freeMemory, totalMemory;
+	cudaMemGetInfo(&freeMemory, &totalMemory);
+	if (freeMemory < 5 * memSize) {
+		printf("Not enough free memory on the device!\n");
+		return(-1);
+	}
+
+	//Create arrays
+	float* matrixA, * matrixB, * resultSh, *resultM, *resultS, *resultC;
+
+	cudaMallocManaged((void**)&matrixA, memSize);
+	cudaMallocManaged((void**)&matrixB, memSize);
+	cudaMallocManaged((void**)&resultSh, memSize);
+	cudaMallocManaged((void**)&resultM, memSize);
+	cudaMallocManaged((void**)&resultS, memSize);
+	cudaMallocManaged((void**)&resultC, memSize);
+
+	//Fill matrixes with data
+	printf("Initializing mtrix A... ");
+	initMatrix(matrixA, size);
+	printf("SUCCESS\n");
+
+	printf("Initializing mtrix B... ");
+	initMatrix(matrixB, size);
+	printf("SUCCESS\n");
+
+	//Create processing grid dimentions
+	dim3 sizeGrid(size, size);
+
+	const unsigned int blockSize = bestSplit(size);
+	const unsigned int gridSize = (size + blockSize - 1) / blockSize;
+	dim3 block(blockSize, blockSize);
+	dim3 grid(gridSize, gridSize);
+
+	//Multiply
+	printf("Multiplying using single-threaded kernel... ");
+	cudaEventRecord(start);
+	multiplyMatrixesSingleThreaded << < sizeGrid, 1 >> > (matrixA, matrixB, resultS, size);
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&timeElapsed, start, stop);
+	printf("SUCCESS (took %f ms)\n",timeElapsed);
+
+	printf("Multiplying using multi-threaded kernel... ");
+	cudaEventRecord(start);
+	multiplyMatrixMultiThreaded <<< grid, block >>> (matrixA, matrixB, resultM, size);
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&timeElapsed, start, stop);
+	printf("SUCCESS (took %f ms)\n", timeElapsed);
+
+	printf("Multiplying with shared memory... ");
+	cudaEventRecord(start);
+	multiplyMatrixShared << < grid, block, sizeof(float) * blockSize * blockSize * 2 >> > (matrixA, matrixB, resultSh, size);
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&timeElapsed, start, stop);
+	printf("SUCCESS (took %f ms)\n", timeElapsed);
+
+	printf("Multiplying with cuBLAS... ");
+	cudaEventRecord(start);
+	multiplyMatrixCublas(matrixA, matrixB, resultC, size);
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&timeElapsed, start, stop);
+	printf("SUCCESS (took %f ms)\n", timeElapsed);
+	//Check results
+	printf("Comapring results (single and multi-threaded)... ");
+	checkResult(resultS, resultM, size);
+
+	printf("Comapring results (single-threaded and shared)... ");
+	checkResult(resultS, resultSh, size);
+
+	printf("Comapring results (single-threaded and cuBLAS)... ");
+	checkResult(resultS, resultC, size);
+
+	//print(matrixA, size);
+	//print(matrixB, size);
+	//print(result, size);
+
+	return 0;
+}
+
+void initMatrix(float* matrix, unsigned int size) {
+	for (int i = 0; i < size; i++) {
+		for (int j = 0; j < size; j++) {
+			matrix[i * size + j] = rand() / RAND_MAX;
+		}
+	}
+}
+
+__global__ void multiplyMatrixesSingleThreaded(float* matrixA, float* matrixB, float* matrixC, unsigned int size) {
+	if (blockIdx.y < size && blockIdx.x < size) {
+		float result = 0;
+		for (int k = 0; k < size; k++) {
+			result += matrixA[blockIdx.y * size + k] * matrixB[blockIdx.x + k * size];
+		}
+		matrixC[blockIdx.y * size + blockIdx.x] = result;
+	}
+}
+
+__global__ void multiplyMatrixMultiThreaded(float* matrixA, float* matrixB, float* matrixC, unsigned int size) {
+	int Row = blockIdx.y * blockDim.y + threadIdx.y;
+	int Col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (Row < size && Col < size) {
+		float result = 0;
+		for (int k = 0; k < size; k++) {
+			result += matrixA[Row * size + k] * matrixB[Col + k * size];
+		}
+		matrixC[Row * size + Col] = result;
+	}
+}
+
+__global__ void multiplyMatrixShared(float* matrixA, float* matrixB, float* matrixC, unsigned int size) {
+	extern __shared__ int array[];
+	int* memA = array;
+	int* memB = array + blockDim.x * blockDim.y;
+
+	int Row = blockIdx.y * blockDim.y + threadIdx.y;
+	int Col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	int result = 0;
+	for (int i = 0; i < (size + blockDim.x - 1) / blockDim.x; i++) {
+		
+		//Fill shared memory
+		memA[threadIdx.y * blockDim.x + threadIdx.x] = matrixA[Row * size + threadIdx.x + i * blockDim.x];
+		memB[threadIdx.y * blockDim.x + threadIdx.x] = matrixB[Col + size * threadIdx.y + size * blockDim.x * i];
+		
+		__syncthreads();
+
+		//Do maths
+		for (int j = 0; j < blockDim.x; j++) {
+			result += memA[blockDim.x * threadIdx.y + j] * memB[threadIdx.x + blockDim.x * j];
+		}
+
+		__syncthreads();
+	}
+	matrixC[Row * size + Col] = result;
+}
+
+void multiplyMatrixCublas(float* matrixA, float* matrixB, float* matrixC, int size) {
+	const float alf = 1;
+	const float bet = 0;
+	const float* alpha = &alf;
+	const float* beta = &bet;
+	cublasHandle_t handle;
+	cublasCreate_v2(&handle);
+	cublasSgemm_v2(handle, CUBLAS_OP_N, CUBLAS_OP_N, size, size, size, alpha, matrixA, size, matrixB, size, beta, matrixC, size);
+	cublasDestroy_v2(handle);
+}
+
+void checkResult(float* matrixA, float* matrixB, unsigned int size) {
+	bool isCorrect = true;
+	for (int i = 0; i < size; i++) {
+		for (int j = 0; j < size; j++) {
+			if (matrixA[i * size + j] != matrixB[i * size + j]) {
+				isCorrect = false;
+				break;
+			}
+		}
+	}
+	if (isCorrect) {
+		printf("Results are equal.\n");
+	}
+	else {
+		printf("Results are not equal!\n");
+	}
+}
+
+void print(float* matrix, int size) {
+	for (int i = 0; i < size; i++) {
+		for (int j = 0; j < size; j++) {
+			printf("%f ",matrix[i * size + j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
+}
+
+int bestSplit(int n) {
+	if (n < 32) {
+		return n;
+	}
+	else {
+		for (int i = 32; i > 0; i--) {
+			if (n % i == 0) return i;
+		}
+		return 1;
+	}
+}
