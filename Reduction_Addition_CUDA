@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #define BLOCK_SIZE 1024
+#define MAX_VECTOR 10000000
 
 __global__ void init(float* vector, unsigned int size) {
 	if (threadIdx.x + blockDim.x * blockIdx.x < size) {
@@ -13,7 +14,7 @@ __global__ void init(float* vector, unsigned int size) {
 }
 
 __global__ void sum(float* input, float* result, unsigned int size) {
-	__shared__ float partialSum[2 * BLOCK_SIZE]=0;
+	__shared__ float partialSum[2 * BLOCK_SIZE];
 	unsigned int t = threadIdx.x, start = 2 * blockIdx.x * BLOCK_SIZE;
 
 	if (t + start < size)
@@ -49,21 +50,26 @@ __global__ void sum(float* input, float* result, unsigned int size) {
 int main()
 {
 	FILE* times;
-	times = fopen("D:\\Projekty\\VS2019\\CUDA_Reduction_addition\\time.txt", "a");
+	times = fopen("D:\\Projekty\\VS2019\\CUDA_Reduction_addition\\time_size.txt", "w+");
 	cudaEvent_t start, stop;
 	float timeElapsed;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
-	unsigned int size;
+	unsigned int size = MAX_VECTOR;
 
-	for (int i = 1; i < 100; i++) {
+	size_t freeMemory, totalMemory;
+	cudaMemGetInfo(&freeMemory, &totalMemory);
+	if (freeMemory < MAX_VECTOR * sizeof(float)+sizeof(float)) {
+		printf("Not enough free memory on the device!\n");
+		return(-1);
+	}
+
+	float* numbers, * result;
+	cudaMallocManaged((void**)&numbers, size * sizeof(float));
+	cudaMallocManaged((void**)&result, sizeof(float));
+
+	for (int i = 10000; i < MAX_VECTOR; i+=1000) {
 		size = i;
-
-		
-		float* numbers, * result;
-
-		cudaMallocManaged((void**)&numbers, size * sizeof(float));
-		cudaMallocManaged((void**)&result, sizeof(float));
 		*result = 0;
 
 		int threadsPerBlock = BLOCK_SIZE;
@@ -87,16 +93,13 @@ int main()
 		cudaEventElapsedTime(&timeElapsed, start, stop);
 		cudaDeviceSynchronize();
 
-		fprintf(times, "%d: %f\n", BLOCK_SIZE, timeElapsed);
+		fprintf(times,"%f\n", timeElapsed);
 	}
-
 	
 	//printf("%f: %f\n", *result, timeElapsed);
 	
 	//printf("threads: %d\n", threadsPerBlock);
-	//printf("blocks: %d\n", newblocksPerGrid);
-
-		
+	//printf("blocks: %d\n", newblocksPerGrid);	
 
 	fclose(times);
     return 0;
