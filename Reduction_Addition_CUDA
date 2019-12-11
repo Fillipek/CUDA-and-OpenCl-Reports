@@ -1,0 +1,103 @@
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include <stdio.h>
+
+#define BLOCK_SIZE 1024
+
+__global__ void init(float* vector, unsigned int size) {
+	if (threadIdx.x + blockDim.x * blockIdx.x < size) {
+		vector[threadIdx.x + blockDim.x * blockIdx.x] = 1.0;//threadIdx.x;
+		//printf("vector[%d] = %.1f\n", threadIdx.x + blockDim.x * blockIdx.x, vector[threadIdx.x + blockDim.x * blockIdx.x]);
+	}
+}
+
+__global__ void sum(float* input, float* result, unsigned int size) {
+	__shared__ float partialSum[2 * BLOCK_SIZE];
+	unsigned int t = threadIdx.x, start = 2 * blockIdx.x * BLOCK_SIZE;
+
+	if (t + start < size)
+		partialSum[t] = input[start + t];
+	else
+		partialSum[t] = 0;
+	if (t + BLOCK_SIZE + start < size)
+		partialSum[BLOCK_SIZE + t] = input[start + BLOCK_SIZE + t];
+	else
+		partialSum[BLOCK_SIZE + t] = 0;
+
+
+	//printf("partialSum[%d] = %.1f\n", t, partialSum[t]);
+	//printf("partialSum[%d] = %.1f\n", t + BLOCK_SIZE, partialSum[start + BLOCK_SIZE + t]);
+
+	for(unsigned int stride = BLOCK_SIZE; stride >= 1; stride >>=1 ) {
+		__syncthreads();
+		if (t < stride) {
+			partialSum[t] += partialSum[t + stride];
+			//printf("partialSumLoop[%d] = %.1f\n", t, partialSum[t]);
+		}
+	}
+
+	if (t == 0) {
+		//printf("result = %.1f\n", partialSum[0]);
+		atomicAdd(result, partialSum[0]);
+		//result[0] += partialSum[0];
+	}
+		
+}
+
+
+int main()
+{
+	FILE* times;
+	times = fopen("D:\\Projekty\\VS2019\\CUDA_Reduction_addition\\time.txt", "a");
+	cudaEvent_t start, stop;
+	float timeElapsed;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	unsigned int size;
+
+	for (int i = 1; i < 100; i++) {
+		size = i;
+
+		
+		float* numbers, * result;
+
+		cudaMallocManaged((void**)&numbers, size * sizeof(float));
+		cudaMallocManaged((void**)&result, sizeof(float));
+		*result = 0;
+
+		int threadsPerBlock = BLOCK_SIZE;
+		int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
+
+		int newblocksPerGrid = blocksPerGrid;
+		if (blocksPerGrid % 2 == 1) {
+			newblocksPerGrid = blocksPerGrid / 2 + 1;
+		}
+		else {
+			newblocksPerGrid /= 2;
+		}
+
+		init << < blocksPerGrid, threadsPerBlock >> > (numbers, size);
+		cudaDeviceSynchronize();
+
+		cudaEventRecord(start);
+		sum << < newblocksPerGrid, threadsPerBlock >> > (numbers, result, size);
+		cudaEventRecord(stop);
+		cudaEventSynchronize(stop);
+		cudaEventElapsedTime(&timeElapsed, start, stop);
+		cudaDeviceSynchronize();
+
+		fprintf(times, "%d: %f\n", BLOCK_SIZE, timeElapsed);
+	}
+
+	
+	//printf("%f: %f\n", *result, timeElapsed);
+	
+	//printf("threads: %d\n", threadsPerBlock);
+	//printf("blocks: %d\n", newblocksPerGrid);
+
+		
+
+	fclose(times);
+    return 0;
+}
