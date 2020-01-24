@@ -1,0 +1,164 @@
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include <stdlib.h>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+void pickSamples(float*,size_t,size_t);
+void printArray(float*,size_t);
+void printArrayToFile(float*,size_t);
+__global__ void GaussianKernelGPU(float*,size_t,float*,size_t,float);
+__global__ void GaussianKernelGPU2D(float*,size_t,float*,size_t,float);
+void GaussianKernelCPU(float*,int,float*,int,float);
+
+int main(int argc, char* argv[]) {
+    //DEFAULT VALUES
+    size_t xSize = 100;
+    size_t numOfSamples = 0;
+    if(argc == 3)
+    xSize = atoi(argv[1]);
+    numOfSamples = atoi(argv[2]);
+
+
+    float *results, *samples;
+    float smoothingParameter = 0.5, expectedValue = 0, stdDeviation = 0;
+    cudaEvent_t start, stop;
+	float timeElapsed;
+
+    //MEMCHECK
+    size_t freeMemory, totalMemory;
+	cudaMemGetInfo(&freeMemory, &totalMemory);
+	if (freeMemory < (xSize+numOfSamples)*sizeof(float) ) {
+		printf("Not enough free memory on the device!\n");
+		return(-1);
+	}
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+    cudaMallocManaged(&results,xSize*sizeof(float));
+    cudaMallocManaged(&samples,numOfSamples*sizeof(float));
+
+    pickSamples(samples,numOfSamples,xSize);
+
+    //MEAN
+    for(int i=0; i<numOfSamples; i++) {
+		expectedValue += samples[i];
+	}
+	expectedValue /= numOfSamples;
+
+    //STD DEVIATION
+    for(int i=0; i<numOfSamples; i++) {
+		stdDeviation += pow(expectedValue-samples[i],2);
+	}
+	stdDeviation /= numOfSamples;
+	stdDeviation = sqrt(stdDeviation);
+
+    //Calculating the smoothing factor
+	smoothingParameter *= stdDeviation*pow(numOfSamples,-0.2);
+    //printf("expected value: %f\nstd deviation: %f\nsmoothing parameter: %f\n",expectedValue,stdDeviation,smoothingParameter);
+
+
+    //printArray(samples,numOfSamples);
+    //printArray(results,xSize);
+
+    int threadsPerBlock = 32;
+    int blocksPerGrid = (xSize + threadsPerBlock - 1) / threadsPerBlock;
+
+    cudaEventRecord(start);
+    GaussianKernelGPU<<<blocksPerGrid,threadsPerBlock>>>(results,xSize,samples,numOfSamples,smoothingParameter);
+    cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&timeElapsed, start, stop);
+	printf("SUCCESS (took %f ms)\n",timeElapsed);
+
+    printArrayToFile(results,xSize);
+
+    cudaFree(results);
+    cudaFree(samples);
+    return 0;
+}
+
+void pickSamples(float* array, size_t size, size_t domain) {
+    srand(time(NULL));
+    for(int i=0; i<size; i++) {
+        array[i] = (float)rand()/RAND_MAX*domain;
+    }
+}
+
+void printArray(float* array, size_t size) {
+	printf("--- PRINTING ARRAY[%lu] ---\n",size);
+	for(int i=0; i<size; i++) {
+		printf("%f\n",array[i]);
+	}
+}
+
+void printArrayToFile(float* array, size_t size) {
+    FILE* f;
+    f = fopen("/home/marcin/Documents/CUDA/project/output.txt","w");
+    for(int i=0; i<size; i++) {
+		fprintf(f,"%f\n",array[i]);
+	}
+    fclose(f);
+}
+
+__global__ void GaussianKernelGPU(float* results, size_t xSize, float* samples, size_t numOfSamples, float smoothingParameter) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    //int stride = blockDim.x * grinumOfSamplesdDim.x;
+
+    for(int i=0; i<numOfSamples; i++) {
+        if(index<xSize) {
+            results[index] += exp(-0.5*pow((index-samples[i])/smoothingParameter,2));
+        }
+        __syncthreads();
+    }
+    //NORNALIZATION - SCOPE IS TOO SMALL FOR BIGGER PLOTS
+    results[index] /= sqrt(2*M_PI);
+}
+
+__global__ void GaussianKernelGPU2D(float* results, size_t xSize, float* samples, size_t numOfSamples, float smoothingParameter) {
+    //NOT WORKING PROPERLY
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = gridDim.x * blockIdx.y;
+    //for(int i=0; i<numOfSamples; i++) {
+        if(index < xSize) {
+            results[index] += expf(-0.5*pow((index-samples[i])/smoothingParameter,2));
+        }
+        __syncthreads();
+
+    // if(blockIdx.x == 0) {
+    //     results[index] /= sqrt(2*M_PI);
+    // }
+
+    //}
+    //NORMALIZATION - SCOPE IS TOO SMALL FOR BIGGER PLOTS
+    //results[index] /= smoothingParameter*numOfSamples;
+}
+
+void GaussianKernelCPU(float* samples,int numOfSamples,float* xArray,int xDomain,float xAccuracy) {
+	float smoothingParameter = 1;
+
+	float expectedValue = 0, stdDeviation = 0;
+	for(int i=0; i<numOfSamples; i++) {
+		expectedValue += samples[i];
+	}
+	expectedValue /= numOfSamples;
+	for(int i=0; i<numOfSamples; i++) {
+		stdDeviation += pow(expectedValue-samples[i],2);
+	}
+	stdDeviation /= numOfSamples;
+	stdDeviation = sqrt(stdDeviation);
+	smoothingParameter *= stdDeviation*pow(numOfSamples,-0.2);
+
+	printf("expected value: %f\nstd deviation: %f\nsmoothing parameter: %f\n",expectedValue,stdDeviation,smoothingParameter);
+
+	resetArray(xArray,xDomain/xAccuracy);
+	for(int i=0; i<numOfSamples; i++) {
+		for(int j=0; j<xDomain/xAccuracy; j++) {
+				xArray[j] += 1/sqrt(2*M_PI) * exp(-0.5*pow((j*xAccuracy-samples[i])/smoothingParameter,2));
+		}
+	}
+	// for(int j=0; j<xDomain/xAccuracy; j++) {
+	// 		xArray[j] /= smoothingParameter*numOfSamples;
+	// }
+}
