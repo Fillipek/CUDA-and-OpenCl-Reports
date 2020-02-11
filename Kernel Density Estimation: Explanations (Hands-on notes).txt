@@ -7,3 +7,5 @@ nvcc -o output ‘Kernel Density Estimation Project: CODE’    ← or any file 
 The program can be launched with two parameters. The first is the domain of X axis on the plot (from 0) and the second is the number of samples we pick randomly. If the program is launched without any parameters the default values are 100 and 0. The program gives the output how long the computation on kernel was and saves the Y value for every X point in the file. The path to the file can be found and changed in line 98 (function printArrayToFile). There is also a function printArray, which prints any value with given size to the output.
 
 ./output [x domain] [number of samples]    ← for example ./output 1000 100
+
+WARNING: The stride is not implemented so one thread covers one x point (we assumed that we dont't have to use huge X scope).
